@@ -8,7 +8,7 @@
 
 - **Current Phase:** Phase 0 — Foundations
 - **Last Session:** 2026-06-23
-- **Next Task:** Phase 0 → Fastify skeleton — `src/app.ts` (instance + plugin registration), `src/server.ts` (bootstrap/listen)
+- **Next Task:** Phase 0 → Config/env parsing + validation at boot — `src/config/`
 
 ---
 
@@ -28,7 +28,7 @@ These lock the TZ §12 open questions (per `CLAUDE.md`). Do not re-litigate duri
 
 - [x] `package.json` + `tsconfig.json` + npm scripts (`dev`, `build`, `test`, `lint`)
 - [x] ESLint + Prettier config
-- [ ] Fastify skeleton — `src/app.ts` (instance + plugin registration), `src/server.ts` (bootstrap/listen)
+- [x] Fastify skeleton — `src/app.ts` (instance + plugin registration), `src/server.ts` (bootstrap/listen)
 - [ ] Config/env parsing + validation at boot — `src/config/`
 - [ ] Prisma init + Postgres via `docker-compose` (db + app services)
 - [ ] Base plugins — pino logging, centralized error handler, `@fastify/swagger` at `/docs`
