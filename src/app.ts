@@ -27,6 +27,7 @@ import { commentRoutes } from './modules/comments/routes.js';
 import { cycleRoutes } from './modules/cycles/routes.js';
 import { moduleRoutes } from './modules/modules/routes.js';
 import { issueRelationRoutes } from './modules/issues/relations/routes.js';
+import { activityRoutes } from './modules/activity/routes.js';
 
 export interface BuildAppOptions {
   /** Pino logger options, or `false`/`true` to disable/enable the default logger. */
@@ -117,6 +118,25 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
   await app.register(issueRelationRoutes, {
     prefix: '/api/v1/workspaces/:workspaceSlug/projects/:projectId/issues/:issueId/relations',
   });
+  await app.register(activityRoutes, {
+    prefix: '/api/v1/workspaces/:workspaceSlug/projects/:projectId/issues/:issueId/activity',
+  });
 
   return app;
+}
+
+
+
+
+
+
+import React from 'react'
+
+export const app = (initialValue=null) => {
+
+let value = initialValue
+function setValue(newValue){
+  value=newValue
+}
+  return [value,setValue]
 }

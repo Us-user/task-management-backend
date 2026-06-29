@@ -1,5 +1,6 @@
 import type { PrismaClient, Prisma } from '@prisma/client';
 import { AppError } from '../../lib/errors.js';
+import { recordActivity, ACTIVITY_ACTIONS } from '../../lib/activity.js';
 import type { CreateCommentBody, UpdateCommentBody } from './schema.js';
 
 type CommentWithAuthor = Prisma.CommentGetPayload<{
@@ -53,14 +54,24 @@ export async function createComment(
     if (!parent) throw AppError.badRequest('parent_comment_id does not exist on this issue');
   }
 
-  return prisma.comment.create({
-    data: {
+  return prisma.$transaction(async (tx) => {
+    const comment = await tx.comment.create({
+      data: {
+        issue_id: issueId,
+        author_id: authorId,
+        body: body.body,
+        parent_comment_id: body.parent_comment_id ?? null,
+      },
+      include: INCLUDE_AUTHOR,
+    });
+    await recordActivity(tx, {
+      workspace_id: workspaceId,
       issue_id: issueId,
-      author_id: authorId,
-      body: body.body,
-      parent_comment_id: body.parent_comment_id ?? null,
-    },
-    include: INCLUDE_AUTHOR,
+      actor_id: authorId,
+      action: ACTIVITY_ACTIONS.COMMENT_CREATED,
+      new_value: comment.id,
+    });
+    return comment;
   });
 }
 
@@ -87,10 +98,20 @@ export async function updateComment(
   if (!isAuthor && !isAdmin)
     throw AppError.forbidden('Only the author or an admin can edit this comment');
 
-  return prisma.comment.update({
-    where: { id: commentId },
-    data: { body: body.body },
-    include: INCLUDE_AUTHOR,
+  return prisma.$transaction(async (tx) => {
+    const updated = await tx.comment.update({
+      where: { id: commentId },
+      data: { body: body.body },
+      include: INCLUDE_AUTHOR,
+    });
+    await recordActivity(tx, {
+      workspace_id: workspaceId,
+      issue_id: issueId,
+      actor_id: requesterId,
+      action: ACTIVITY_ACTIONS.COMMENT_UPDATED,
+      new_value: commentId,
+    });
+    return updated;
   });
 }
 
@@ -116,5 +137,14 @@ export async function deleteComment(
   if (!isAuthor && !isAdmin)
     throw AppError.forbidden('Only the author or an admin can delete this comment');
 
-  await prisma.comment.update({ where: { id: commentId }, data: { deleted_at: new Date() } });
+  await prisma.$transaction(async (tx) => {
+    await tx.comment.update({ where: { id: commentId }, data: { deleted_at: new Date() } });
+    await recordActivity(tx, {
+      workspace_id: workspaceId,
+      issue_id: issueId,
+      actor_id: requesterId,
+      action: ACTIVITY_ACTIONS.COMMENT_DELETED,
+      old_value: commentId,
+    });
+  });
 }

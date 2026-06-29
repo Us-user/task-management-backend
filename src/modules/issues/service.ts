@@ -1,6 +1,26 @@
 import type { PrismaClient, Issue, Prisma } from '@prisma/client';
 import { AppError } from '../../lib/errors.js';
+import { recordActivity, recordActivities, ACTIVITY_ACTIONS } from '../../lib/activity.js';
 import type { CreateIssueBody, UpdateIssueBody, IssueFilterQuery } from './schema.js';
+
+/** Coerce an issue field value to its stored string form for the activity trail. */
+function activityValue(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  if (value instanceof Date) return value.toISOString();
+  return String(value);
+}
+
+/** Issue scalar fields whose changes are recorded in the activity trail. */
+const TRACKED_FIELDS = [
+  'title',
+  'description',
+  'state_id',
+  'priority',
+  'parent_id',
+  'start_date',
+  'due_date',
+  'estimate_points',
+] as const;
 
 /** Issue with assignees and labels included (the standard response shape). */
 type IssueWithRelations = Prisma.IssueGetPayload<{
@@ -238,6 +258,13 @@ export async function createIssue(
       include: INCLUDE_RELATIONS,
     });
 
+    await recordActivity(tx, {
+      workspace_id: workspaceId,
+      issue_id: issue.id,
+      actor_id: creatorId,
+      action: ACTIVITY_ACTIONS.ISSUE_CREATED,
+    });
+
     return issue;
   });
 }
@@ -257,10 +284,11 @@ export async function updateIssue(
   workspaceId: string,
   projectId: string,
   issueId: string,
+  actorId: string,
   body: UpdateIssueBody,
 ): Promise<IssueWithRelations> {
   await resolveProject(prisma, workspaceId, projectId);
-  await resolveIssue(prisma, projectId, issueId);
+  const before = await resolveIssue(prisma, projectId, issueId);
 
   if (body.state_id) {
     const state = await prisma.state.findFirst({
@@ -286,25 +314,48 @@ export async function updateIssue(
       })()
     : undefined;
 
-  return prisma.issue.update({
-    where: { id: issueId },
-    data: {
-      ...(body.title !== undefined && { title: body.title }),
-      ...(body.description !== undefined && { description: body.description }),
-      ...(body.state_id !== undefined && { state_id: body.state_id }),
-      ...(body.priority !== undefined && { priority: body.priority }),
-      ...(body.parent_id !== undefined && { parent_id: body.parent_id }),
-      ...(body.start_date !== undefined && {
-        start_date: body.start_date ? new Date(body.start_date) : null,
-      }),
-      ...(body.due_date !== undefined && {
-        due_date: body.due_date ? new Date(body.due_date) : null,
-      }),
-      ...(body.estimate_points !== undefined && { estimate_points: body.estimate_points }),
-      ...(body.sort_order !== undefined && { sort_order: body.sort_order }),
-      ...(completedAt !== undefined && { completed_at: completedAt }),
-    },
-    include: INCLUDE_RELATIONS,
+  return prisma.$transaction(async (tx) => {
+    const after = await tx.issue.update({
+      where: { id: issueId },
+      data: {
+        ...(body.title !== undefined && { title: body.title }),
+        ...(body.description !== undefined && { description: body.description }),
+        ...(body.state_id !== undefined && { state_id: body.state_id }),
+        ...(body.priority !== undefined && { priority: body.priority }),
+        ...(body.parent_id !== undefined && { parent_id: body.parent_id }),
+        ...(body.start_date !== undefined && {
+          start_date: body.start_date ? new Date(body.start_date) : null,
+        }),
+        ...(body.due_date !== undefined && {
+          due_date: body.due_date ? new Date(body.due_date) : null,
+        }),
+        ...(body.estimate_points !== undefined && { estimate_points: body.estimate_points }),
+        ...(body.sort_order !== undefined && { sort_order: body.sort_order }),
+        ...(completedAt !== undefined && { completed_at: completedAt }),
+      },
+      include: INCLUDE_RELATIONS,
+    });
+
+    // Record one activity row per scalar field that actually changed.
+    const changes = TRACKED_FIELDS.flatMap((field) => {
+      const oldValue = activityValue(before[field]);
+      const newValue = activityValue(after[field]);
+      if (oldValue === newValue) return [];
+      return [
+        {
+          workspace_id: workspaceId,
+          issue_id: issueId,
+          actor_id: actorId,
+          action: ACTIVITY_ACTIONS.ISSUE_UPDATED,
+          field,
+          old_value: oldValue,
+          new_value: newValue,
+        },
+      ];
+    });
+    await recordActivities(tx, changes);
+
+    return after;
   });
 }
 
@@ -313,13 +364,22 @@ export async function deleteIssue(
   workspaceId: string,
   projectId: string,
   issueId: string,
+  actorId: string,
 ): Promise<void> {
   await resolveProject(prisma, workspaceId, projectId);
   await resolveIssue(prisma, projectId, issueId);
 
-  await prisma.issue.update({
-    where: { id: issueId },
-    data: { deleted_at: new Date() },
+  await prisma.$transaction(async (tx) => {
+    await tx.issue.update({
+      where: { id: issueId },
+      data: { deleted_at: new Date() },
+    });
+    await recordActivity(tx, {
+      workspace_id: workspaceId,
+      issue_id: issueId,
+      actor_id: actorId,
+      action: ACTIVITY_ACTIONS.ISSUE_DELETED,
+    });
   });
 }
 
@@ -330,6 +390,7 @@ export async function addAssignee(
   workspaceId: string,
   projectId: string,
   issueId: string,
+  actorId: string,
   userId: string,
 ): Promise<IssueWithRelations> {
   await resolveProject(prisma, workspaceId, projectId);
@@ -340,7 +401,17 @@ export async function addAssignee(
   });
   if (existing) throw AppError.conflict('User is already assigned to this issue');
 
-  await prisma.issueAssignee.create({ data: { issue_id: issueId, user_id: userId } });
+  await prisma.$transaction(async (tx) => {
+    await tx.issueAssignee.create({ data: { issue_id: issueId, user_id: userId } });
+    await recordActivity(tx, {
+      workspace_id: workspaceId,
+      issue_id: issueId,
+      actor_id: actorId,
+      action: ACTIVITY_ACTIONS.ISSUE_ASSIGNEE_ADDED,
+      field: 'assignee',
+      new_value: userId,
+    });
+  });
   return resolveIssue(prisma, projectId, issueId);
 }
 
@@ -349,6 +420,7 @@ export async function removeAssignee(
   workspaceId: string,
   projectId: string,
   issueId: string,
+  actorId: string,
   userId: string,
 ): Promise<IssueWithRelations> {
   await resolveProject(prisma, workspaceId, projectId);
@@ -359,8 +431,18 @@ export async function removeAssignee(
   });
   if (!existing) throw AppError.notFound('Assignee not found on this issue');
 
-  await prisma.issueAssignee.delete({
-    where: { issue_id_user_id: { issue_id: issueId, user_id: userId } },
+  await prisma.$transaction(async (tx) => {
+    await tx.issueAssignee.delete({
+      where: { issue_id_user_id: { issue_id: issueId, user_id: userId } },
+    });
+    await recordActivity(tx, {
+      workspace_id: workspaceId,
+      issue_id: issueId,
+      actor_id: actorId,
+      action: ACTIVITY_ACTIONS.ISSUE_ASSIGNEE_REMOVED,
+      field: 'assignee',
+      old_value: userId,
+    });
   });
   return resolveIssue(prisma, projectId, issueId);
 }
@@ -372,6 +454,7 @@ export async function attachLabel(
   workspaceId: string,
   projectId: string,
   issueId: string,
+  actorId: string,
   labelId: string,
 ): Promise<IssueWithRelations> {
   await resolveProject(prisma, workspaceId, projectId);
@@ -385,7 +468,17 @@ export async function attachLabel(
   });
   if (existing) throw AppError.conflict('Label is already attached to this issue');
 
-  await prisma.issueLabel.create({ data: { issue_id: issueId, label_id: labelId } });
+  await prisma.$transaction(async (tx) => {
+    await tx.issueLabel.create({ data: { issue_id: issueId, label_id: labelId } });
+    await recordActivity(tx, {
+      workspace_id: workspaceId,
+      issue_id: issueId,
+      actor_id: actorId,
+      action: ACTIVITY_ACTIONS.ISSUE_LABEL_ADDED,
+      field: 'label',
+      new_value: labelId,
+    });
+  });
   return resolveIssue(prisma, projectId, issueId);
 }
 
@@ -394,6 +487,7 @@ export async function detachLabel(
   workspaceId: string,
   projectId: string,
   issueId: string,
+  actorId: string,
   labelId: string,
 ): Promise<IssueWithRelations> {
   await resolveProject(prisma, workspaceId, projectId);
@@ -404,8 +498,18 @@ export async function detachLabel(
   });
   if (!existing) throw AppError.notFound('Label is not attached to this issue');
 
-  await prisma.issueLabel.delete({
-    where: { issue_id_label_id: { issue_id: issueId, label_id: labelId } },
+  await prisma.$transaction(async (tx) => {
+    await tx.issueLabel.delete({
+      where: { issue_id_label_id: { issue_id: issueId, label_id: labelId } },
+    });
+    await recordActivity(tx, {
+      workspace_id: workspaceId,
+      issue_id: issueId,
+      actor_id: actorId,
+      action: ACTIVITY_ACTIONS.ISSUE_LABEL_REMOVED,
+      field: 'label',
+      old_value: labelId,
+    });
   });
   return resolveIssue(prisma, projectId, issueId);
 }
