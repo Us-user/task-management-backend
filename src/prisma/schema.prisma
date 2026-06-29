@@ -46,6 +46,13 @@ enum ModuleStatus {
   cancelled
 }
 
+enum IssueLinkType {
+  blocks
+  blocked_by
+  relates_to
+  duplicates
+}
+
 // ─── Models ──────────────────────────────────────────────────────────────────
 
 model User {
@@ -197,10 +204,12 @@ model Issue {
   created_by User            @relation("IssueCreatedBy", fields: [created_by_id], references: [id])
   parent     Issue?          @relation("SubIssue", fields: [parent_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
   children   Issue[]         @relation("SubIssue")
-  assignees  IssueAssignee[]
-  labels     IssueLabel[]
-  comments   Comment[]
-  modules    ModuleIssue[]
+  assignees        IssueAssignee[]
+  labels           IssueLabel[]
+  comments         Comment[]
+  modules          ModuleIssue[]
+  outgoing_links   IssueLink[]     @relation("IssueLinkSource")
+  incoming_links   IssueLink[]     @relation("IssueLinkTarget")
 
   @@unique([project_id, sequence_id])
   @@index([workspace_id])
@@ -328,4 +337,19 @@ model ModuleIssue {
 
   @@id([module_id, issue_id])
   @@index([issue_id])
+}
+
+model IssueLink {
+  id               String        @id @default(uuid())
+  issue_id         String
+  related_issue_id String
+  relation_type    IssueLinkType
+  created_at       DateTime      @default(now())
+
+  issue         Issue @relation("IssueLinkSource", fields: [issue_id], references: [id], onDelete: Cascade)
+  related_issue Issue @relation("IssueLinkTarget", fields: [related_issue_id], references: [id], onDelete: Cascade)
+
+  @@unique([issue_id, related_issue_id, relation_type])
+  @@index([issue_id])
+  @@index([related_issue_id])
 }

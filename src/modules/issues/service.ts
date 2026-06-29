@@ -63,39 +63,91 @@ function normalizeArrayParam(value: string | string[] | undefined): string[] | u
   return Array.isArray(value) ? value : [value];
 }
 
-export async function listIssues(
-  prisma: PrismaClient,
-  workspaceId: string,
-  projectId: string,
-  query: IssueFilterQuery,
-): Promise<{ data: IssueWithRelations[]; next_cursor: string | null }> {
-  await resolveProject(prisma, workspaceId, projectId);
+/** Build a `due_date`/`created_at` range filter from before/after bounds. */
+function dateRange(after?: string, before?: string): Prisma.DateTimeFilter | undefined {
+  if (after === undefined && before === undefined) return undefined;
+  return {
+    ...(after !== undefined && { gte: new Date(after) }),
+    ...(before !== undefined && { lte: new Date(before) }),
+  };
+}
 
+/** Translate the validated filter query into a Prisma `where` clause. */
+function buildWhere(projectId: string, query: IssueFilterQuery): Prisma.IssueWhereInput {
   const states = normalizeArrayParam(query.state);
   const priorities = normalizeArrayParam(query.priority);
   const assignees = normalizeArrayParam(query.assignee);
   const labels = normalizeArrayParam(query.label);
+  const dueDate = dateRange(query.due_after, query.due_before);
+  const createdAt = dateRange(query.created_after, query.created_before);
 
-  const where: Prisma.IssueWhereInput = {
+  return {
     project_id: projectId,
     deleted_at: null,
     ...(states && { state_id: { in: states } }),
     ...(priorities && { priority: { in: priorities as Issue['priority'][] } }),
     ...(assignees && { assignees: { some: { user_id: { in: assignees } } } }),
     ...(labels && { labels: { some: { label_id: { in: labels } } } }),
+    ...(query.cycle !== undefined && { cycle_id: query.cycle }),
+    ...(query.module !== undefined && { modules: { some: { module_id: query.module } } }),
+    ...(query.created_by !== undefined && { created_by_id: query.created_by }),
     ...(query.parent_id !== undefined && { parent_id: query.parent_id }),
     ...(query.search && {
-      title: { contains: query.search, mode: 'insensitive' as const },
+      OR: [
+        { title: { contains: query.search, mode: 'insensitive' as const } },
+        { description: { contains: query.search, mode: 'insensitive' as const } },
+      ],
     }),
-    ...(query.cursor && { id: { gt: query.cursor } }),
+    ...(dueDate && { due_date: dueDate }),
+    ...(createdAt && { created_at: createdAt }),
   };
+}
+
+/** Sort by the requested column, with `id` as a deterministic tiebreaker for stable cursoring. */
+function buildOrderBy(query: IssueFilterQuery): Prisma.IssueOrderByWithRelationInput[] {
+  return [{ [query.sort_by]: query.order }, { id: query.order }];
+}
+
+/** Hard cap on rows returned for a board-view (grouped) response. */
+const GROUP_FETCH_CAP = 500;
+
+export interface IssueGroup {
+  key: string | null;
+  issues: IssueWithRelations[];
+}
+
+export type ListIssuesResult =
+  | { data: IssueWithRelations[]; next_cursor: string | null }
+  | { group_by: NonNullable<IssueFilterQuery['group_by']>; groups: IssueGroup[] };
+
+export async function listIssues(
+  prisma: PrismaClient,
+  workspaceId: string,
+  projectId: string,
+  query: IssueFilterQuery,
+): Promise<ListIssuesResult> {
+  await resolveProject(prisma, workspaceId, projectId);
+
+  const where = buildWhere(projectId, query);
+  const orderBy = buildOrderBy(query);
+
+  if (query.group_by) {
+    const issues = await prisma.issue.findMany({
+      where,
+      include: INCLUDE_RELATIONS,
+      orderBy,
+      take: GROUP_FETCH_CAP,
+    });
+    return { group_by: query.group_by, groups: bucketIssues(issues, query.group_by) };
+  }
 
   const limit = query.limit;
   const issues = await prisma.issue.findMany({
     where,
     include: INCLUDE_RELATIONS,
-    orderBy: { created_at: 'asc' },
+    orderBy,
     take: limit + 1, // fetch one extra to determine if there is a next page
+    ...(query.cursor && { cursor: { id: query.cursor }, skip: 1 }),
   });
 
   const hasMore = issues.length > limit;
@@ -103,6 +155,35 @@ export async function listIssues(
   const next_cursor = hasMore ? (data[data.length - 1]?.id ?? null) : null;
 
   return { data, next_cursor };
+}
+
+/**
+ * Bucket issues for a board view. Buckets preserve the order in which keys are
+ * first seen (i.e. the sort order). For `assignee`, an issue appears in every
+ * assignee bucket it belongs to; unassigned issues fall into the `null` bucket.
+ */
+function bucketIssues(
+  issues: IssueWithRelations[],
+  groupBy: NonNullable<IssueFilterQuery['group_by']>,
+): IssueGroup[] {
+  const groups = new Map<string | null, IssueWithRelations[]>();
+  const push = (key: string | null, issue: IssueWithRelations): void => {
+    const bucket = groups.get(key);
+    if (bucket) bucket.push(issue);
+    else groups.set(key, [issue]);
+  };
+
+  for (const issue of issues) {
+    if (groupBy === 'state') push(issue.state_id, issue);
+    else if (groupBy === 'priority') push(issue.priority, issue);
+    else if (issue.assignees.length === 0) push(null, issue);
+    else for (const a of issue.assignees) push(a.user_id, issue);
+  }
+
+  return [...groups.entries()].map(([key, bucketIssuesList]) => ({
+    key,
+    issues: bucketIssuesList,
+  }));
 }
 
 export async function createIssue(
