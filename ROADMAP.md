@@ -8,7 +8,7 @@
 
 - **Current Phase:** Phase 3 — Collaboration & polish (Phase 2 complete)
 - **Last Session:** 2026-06-30
-- **Next Task:** Phase 3 → Notifications — generated on assign/mention/comment events; list + mark-read
+- **Next Task:** Phase 3 → Email-based invites
 
 ---
 
@@ -61,7 +61,7 @@ These lock the TZ §12 open questions (per `CLAUDE.md`). Do not re-litigate duri
 ## Phase 3 — Collaboration & polish
 
 - [x] Attachments — object storage (S3/MinIO), DB metadata only
-- [ ] Notifications — generated on assign/mention/comment events; list + mark-read
+- [x] Notifications — generated on assign/mention/comment events; list + mark-read
 - [ ] Email-based invites
 - [ ] OAuth login
 

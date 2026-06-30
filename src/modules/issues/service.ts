@@ -1,6 +1,7 @@
 import type { PrismaClient, Issue, Prisma } from '@prisma/client';
 import { AppError } from '../../lib/errors.js';
 import { recordActivity, recordActivities, ACTIVITY_ACTIONS } from '../../lib/activity.js';
+import { notify } from '../../lib/notifications.js';
 import type { CreateIssueBody, UpdateIssueBody, IssueFilterQuery } from './schema.js';
 
 /** Coerce an issue field value to its stored string form for the activity trail. */
@@ -265,6 +266,16 @@ export async function createIssue(
       action: ACTIVITY_ACTIONS.ISSUE_CREATED,
     });
 
+    // Notify anyone assigned at creation time (the creator self-assigning is
+    // filtered out inside `notify`).
+    await notify(tx, {
+      workspace_id: workspaceId,
+      actor_id: creatorId,
+      type: 'issue_assigned',
+      recipient_ids: body.assignee_ids ?? [],
+      issue_id: issue.id,
+    });
+
     return issue;
   });
 }
@@ -410,6 +421,13 @@ export async function addAssignee(
       action: ACTIVITY_ACTIONS.ISSUE_ASSIGNEE_ADDED,
       field: 'assignee',
       new_value: userId,
+    });
+    await notify(tx, {
+      workspace_id: workspaceId,
+      actor_id: actorId,
+      type: 'issue_assigned',
+      recipient_ids: [userId],
+      issue_id: issueId,
     });
   });
   return resolveIssue(prisma, projectId, issueId);
